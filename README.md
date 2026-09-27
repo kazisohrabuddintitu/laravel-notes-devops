@@ -1,5 +1,7 @@
 # Laravel Notes: DevOps Learning Project
 
+[![tests](https://github.com/kazisohrabuddintitu/laravel-notes-devops/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kazisohrabuddintitu/laravel-notes-devops/actions/workflows/tests.yml)
+
 A small notes app built with Laravel, Inertia.js and React. The app is deliberately simple: the point of this repo is the DevOps work around it. It will be containerized with Docker, tested and deployed with GitHub Actions, and run on AWS with infrastructure managed by Terraform.
 
 ## Features
@@ -94,15 +96,33 @@ Run the same checks as CI (formatting, linting, type checks, static analysis and
 composer ci:check
 ```
 
+## CI/CD pipeline
+
+The GitHub Actions workflow in `.github/workflows/tests.yml` runs on every pull request and on every push to `main`. It has two jobs that run in parallel:
+
+| Job      | What it does                                                                                                                    |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `ci`     | Formatting, linting, type checks, static analysis and tests, with the tests running against a PostgreSQL 18 service container   |
+| `docker` | Builds the production image (with layer caching), scans it with Trivy, and on `main` pushes it to the GitHub Container Registry |
+
+Trivy results are uploaded to the repository's **Security → Code scanning** tab, and the build fails if the image contains a critical vulnerability that has a fix available.
+
+Images from `main` are published as:
+
+```bash
+docker pull ghcr.io/kazisohrabuddintitu/laravel-notes-devops:latest        # newest main
+docker pull ghcr.io/kazisohrabuddintitu/laravel-notes-devops:sha-<commit>  # a specific commit
+```
+
 ## Workflow
 
-`main` is protected: every change goes through a pull request, and the `ci` check must pass before it can be merged.
+`main` is protected: every change goes through a pull request, both the `ci` and `docker` checks must pass, and the branch must be up to date with `main` before it can be merged.
 
 ## Roadmap
 
 - [x] Phase 1: App, Git and GitHub
 - [x] Phase 2: Docker (multi-stage image, Docker Compose)
-- [ ] Phase 3: CI pipeline (tests against PostgreSQL, image build, security scan)
+- [x] Phase 3: CI pipeline (tests against PostgreSQL, image build, security scan, image publishing)
 - [ ] Phase 4: AWS fundamentals
 - [ ] Phase 5: Infrastructure as Code with Terraform (VPC, ECS, RDS, ALB)
 - [ ] Phase 6: Continuous deployment to AWS via GitHub OIDC
