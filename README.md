@@ -120,6 +120,7 @@ docker pull ghcr.io/kazisohrabuddintitu/laravel-notes-devops:sha-<commit>  # a s
 
 ## Roadmap
 
+- [x] Phase 0: AWS account setup (MFA, IAM admin user, budget alerts, CLI access without long-lived keys)
 - [x] Phase 1: App, Git and GitHub
 - [x] Phase 2: Docker (multi-stage image, Docker Compose)
 - [x] Phase 3: CI pipeline (tests against PostgreSQL, image build, security scan, image publishing)
