@@ -32,6 +32,10 @@ resources/js/actions
 resources/js/routes
 resources/js/wayfinder
 
+# CI tooling output (Trivy cache and reports)
+.cache
+*.sarif
+
 # Local AI tooling
 .claude
 .mcp.json
