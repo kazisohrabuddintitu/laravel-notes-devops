@@ -9,15 +9,38 @@ A small notes app built with Laravel, Inertia.js and React. The app is deliberat
 
 ## Tech stack
 
-| Layer             | Technology                                        |
-| ----------------- | ------------------------------------------------- |
-| Backend           | Laravel 13, PHP 8.5                               |
-| Frontend          | Inertia.js v3, React 19, TypeScript, Tailwind CSS |
-| Database          | PostgreSQL 18                                     |
-| Testing & quality | Pest, PHPStan (Larastan), Pint                    |
-| CI                | GitHub Actions                                    |
+| Layer             | Technology                                                 |
+| ----------------- | ---------------------------------------------------------- |
+| Backend           | Laravel 13, PHP 8.5                                        |
+| Frontend          | Inertia.js v3, React 19, TypeScript, Tailwind CSS          |
+| Database          | PostgreSQL 18                                              |
+| Testing & quality | Pest, PHPStan (Larastan), Pint                             |
+| CI                | GitHub Actions                                             |
+| Containers        | Docker, Docker Compose, serversideup/php (PHP-FPM + nginx) |
 
-## Run locally
+## Run with Docker
+
+Requirements: Docker and a `.env` file containing an `APP_KEY` (see step 2 below if you don't have one yet).
+
+```bash
+docker compose up -d --build
+docker compose exec app php artisan migrate
+```
+
+Open http://localhost:8000 and register an account.
+
+The `app` service runs the production-style image built from the `Dockerfile` (PHP-FPM + nginx, with compiled frontend assets), and the `postgres` service runs PostgreSQL 18. The database is only reachable from the `app` container and stores its data in the `pgdata` volume.
+
+Useful commands:
+
+```bash
+docker compose ps              # status and health of the containers
+docker compose logs -f app     # follow the application logs
+docker compose exec app bash   # open a shell inside the app container
+docker compose down            # stop and remove the containers (the data volume is kept)
+```
+
+## Run locally (for development)
 
 Requirements: PHP 8.5, Composer, Node 22 and Docker.
 
@@ -78,7 +101,7 @@ composer ci:check
 ## Roadmap
 
 - [x] Phase 1: App, Git and GitHub
-- [ ] Phase 2: Docker (multi-stage image, Docker Compose)
+- [x] Phase 2: Docker (multi-stage image, Docker Compose)
 - [ ] Phase 3: CI pipeline (tests against PostgreSQL, image build, security scan)
 - [ ] Phase 4: AWS fundamentals
 - [ ] Phase 5: Infrastructure as Code with Terraform (VPC, ECS, RDS, ALB)

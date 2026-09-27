@@ -1,0 +1,42 @@
+services:
+    app:
+        build:
+            context: .
+            target: production
+        image: notes-app:local
+        ports:
+            - '8000:8080'
+        environment:
+            APP_NAME: 'Laravel Notes'
+            APP_ENV: local
+            APP_DEBUG: 'true'
+            APP_KEY: ${APP_KEY}
+            APP_URL: http://localhost:8000
+            LOG_CHANNEL: stderr
+            DB_CONNECTION: pgsql
+            DB_HOST: postgres
+            DB_PORT: 5432
+            DB_DATABASE: notes
+            DB_USERNAME: notes
+            DB_PASSWORD: secret
+            SHOW_WELCOME_MESSAGE: 'false'
+        depends_on:
+            postgres:
+                condition: service_healthy
+
+    postgres:
+        image: postgres:18
+        environment:
+            POSTGRES_USER: notes
+            POSTGRES_PASSWORD: secret
+            POSTGRES_DB: notes
+        volumes:
+            - pgdata:/var/lib/postgresql
+        healthcheck:
+            test: ['CMD-SHELL', 'pg_isready -U notes -d notes']
+            interval: 5s
+            timeout: 5s
+            retries: 10
+
+volumes:
+    pgdata:
