@@ -6,6 +6,10 @@
 FROM serversideup/php:8.5-fpm-nginx-trixie AS base
 
 USER root
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 RUN install-php-extensions pdo_pgsql
 USER www-data
 
