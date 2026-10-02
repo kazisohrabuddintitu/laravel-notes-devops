@@ -98,12 +98,14 @@ composer ci:check
 
 ## CI/CD pipeline
 
-The GitHub Actions workflow in `.github/workflows/tests.yml` runs on every pull request and on every push to `main`. It has two jobs that run in parallel:
+The GitHub Actions workflow in `.github/workflows/tests.yml` runs on every pull request and on every push to `main`. A small `changes` job first checks which files changed, then two jobs run in parallel:
 
 | Job      | What it does                                                                                                                    |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `ci`     | Formatting, linting, type checks, static analysis and tests, with the tests running against a PostgreSQL 18 service container   |
 | `docker` | Builds the production image (with layer caching), scans it with Trivy, and on `main` pushes it to the GitHub Container Registry |
+
+When a change only touches Markdown files, `ci` and `docker` are skipped. Skipped jobs count as passed, so documentation-only pull requests can still be merged.
 
 Trivy results are uploaded to the repository's **Security → Code scanning** tab, and the build fails if the image contains a critical vulnerability that has a fix available.
 
@@ -124,7 +126,7 @@ docker pull ghcr.io/kazisohrabuddintitu/laravel-notes-devops:sha-<commit>  # a s
 - [x] Phase 1: App, Git and GitHub
 - [x] Phase 2: Docker (multi-stage image, Docker Compose)
 - [x] Phase 3: CI pipeline (tests against PostgreSQL, image build, security scan, image publishing)
-- [ ] Phase 4: AWS fundamentals
+- [x] Phase 4: AWS fundamentals (VPC, security groups, EC2, ECR, RDS, ECS Fargate and ALB, built by hand in the console)
 - [ ] Phase 5: Infrastructure as Code with Terraform (VPC, ECS, RDS, ALB)
 - [ ] Phase 6: Continuous deployment to AWS via GitHub OIDC
 - [ ] Phase 7: Secrets and environments
