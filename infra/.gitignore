@@ -1,0 +1,21 @@
+# Provider plugins and module cache, recreated by `terraform init`
+.terraform/
+
+# State can contain secrets in plain text; it lives in the S3 backend instead
+*.tfstate
+*.tfstate.*
+
+# Variable files and saved plans can contain secrets
+*.tfvars
+*.tfvars.json
+*.tfplan
+
+# Crash logs and local overrides
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep the provider lock file (.terraform.lock.hcl) committed, like composer.lock
