@@ -30,7 +30,7 @@ export default function NotesIndex({ notes }: { notes: Note[] }) {
                 <section className="max-w-xl space-y-6">
                     <Heading
                         title="Notes"
-                        description="Write something down so you don't forget it"
+                        description="Write something down so you don't forget it. Deployed by CD 🚀"
                     />
 
                     <Form
