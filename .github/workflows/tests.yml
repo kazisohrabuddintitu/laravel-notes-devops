@@ -294,18 +294,31 @@ jobs:
           aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
             --task-definition "$TASK_DEF" > /dev/null
 
-          echo "Waiting for the service to become stable..."
-          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          # Follow the deployment's own rollout state instead of the
+          # services-stable waiter: the waiter only compares task counts, so it
+          # can return before ECS marks the rollout COMPLETED, and it also
+          # returns "stable" after a circuit-breaker rollback.
+          echo "Waiting for the rollout to finish..."
+          for attempt in $(seq 1 80); do
+            read -r running_def rollout <<< "$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+              --query 'services[0].deployments[?status==`PRIMARY`] | [0].[taskDefinition, rolloutState]' --output text)"
 
-          # A circuit-breaker rollback also ends "stable", so check that our
-          # revision is the one running and that the rollout completed.
-          read -r running_def rollout <<< "$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
-            --query 'services[0].deployments[?status==`PRIMARY`] | [0].[taskDefinition, rolloutState]' --output text)"
+            if [ "$running_def" != "$TASK_DEF" ]; then
+              echo "::error::ECS rolled back to $running_def (the new tasks did not become healthy). Logs: CloudWatch /ecs/notes-app"
+              exit 1
+            fi
 
-          if [ "$running_def" != "$TASK_DEF" ] || [ "$rollout" != "COMPLETED" ]; then
-            echo "::error::Deployment did not complete (running $running_def, rollout $rollout). ECS rolled back."
-            exit 1
-          fi
+            case "$rollout" in
+              COMPLETED) echo "Rollout completed"; break ;;
+              FAILED) echo "::error::Rollout failed. Logs: CloudWatch /ecs/notes-app"; exit 1 ;;
+            esac
+
+            if [ "$attempt" -eq 80 ]; then
+              echo "::error::Rollout still $rollout after 20 minutes"
+              exit 1
+            fi
+            sleep 15
+          done
 
           echo "### Deployed $IMAGE_TAG" >> "$GITHUB_STEP_SUMMARY"
           echo "Task definition: \`$TASK_DEF\`" >> "$GITHUB_STEP_SUMMARY"

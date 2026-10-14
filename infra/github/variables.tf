@@ -11,9 +11,13 @@ variable "project" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository (owner/name) allowed to assume the deploy role"
+  description = "GitHub repository allowed to assume the deploy role, as it appears in the OIDC sub claim"
   type        = string
-  default     = "kazisohrabuddintitu/laravel-notes-devops"
+  # Immutable subject format: owner@owner_id/repo@repo_id. The IDs never
+  # change, so a deleted or renamed repo cannot be recreated under the same
+  # name to get this role. Check with:
+  # gh api repos/OWNER/REPO/actions/oidc/customization/sub
+  default = "kazisohrabuddintitu@86562061/laravel-notes-devops@1388242293"
 }
 
 variable "github_environment" {
