@@ -113,7 +113,7 @@ resource "aws_ecs_task_definition" "app" {
 }
 
 # --- Service: keeps desired_count tasks running and registers them in the
-# target group. Run migrations (one-off task) before changing the image. ---
+# target group. Deploys (migrations, then a new image) are done by CD. ---
 
 resource "aws_ecs_service" "app" {
   name            = "${var.project}-web"
@@ -149,6 +149,12 @@ resource "aws_ecs_service" "app" {
   }
 
   propagate_tags = "SERVICE"
+
+  # Terraform creates the service with the first image; after that the deploy
+  # job in GitHub Actions decides which task definition revision runs.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   # The target group must be attached to the ALB before the service can use it.
   depends_on = [aws_lb_listener.http]
