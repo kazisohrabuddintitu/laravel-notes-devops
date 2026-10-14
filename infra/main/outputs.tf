@@ -38,9 +38,9 @@ output "ecs_cluster_name" {
   value       = aws_ecs_cluster.main.name
 }
 
-output "task_definition_arn" {
-  description = "ARN of the current app task definition revision"
-  value       = aws_ecs_task_definition.app.arn
+output "task_definition_family" {
+  description = "Task definition family; the deploy job registers a new revision in it for every release"
+  value       = aws_ecs_task_definition.app.family
 }
 
 output "app_security_group_id" {

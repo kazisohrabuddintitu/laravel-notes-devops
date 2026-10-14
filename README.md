@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/kazisohrabuddintitu/laravel-notes-devops/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kazisohrabuddintitu/laravel-notes-devops/actions/workflows/tests.yml)
 
-A small notes app built with Laravel, Inertia.js and React. The app is deliberately simple: the point of this repo is the DevOps work around it. It will be containerized with Docker, tested and deployed with GitHub Actions, and run on AWS with infrastructure managed by Terraform.
+A small notes app built with Laravel, Inertia.js and React. The app is deliberately simple: the point of this repo is the DevOps work around it. It is containerized with Docker, tested and deployed with GitHub Actions, and runs on AWS with infrastructure managed by Terraform.
 
 ## Features
 
@@ -17,7 +17,7 @@ A small notes app built with Laravel, Inertia.js and React. The app is deliberat
 | Frontend          | Inertia.js v3, React 19, TypeScript, Tailwind CSS          |
 | Database          | PostgreSQL 18                                              |
 | Testing & quality | Pest, PHPStan (Larastan), Pint                             |
-| CI                | GitHub Actions                                             |
+| CI/CD             | GitHub Actions, OIDC to AWS (no stored keys)               |
 | Containers        | Docker, Docker Compose, serversideup/php (PHP-FPM + nginx) |
 | Infrastructure    | Terraform, AWS (VPC, ECR, RDS, ECS Fargate, ALB)           |
 
@@ -99,14 +99,28 @@ composer ci:check
 
 ## CI/CD pipeline
 
-The GitHub Actions workflow in `.github/workflows/tests.yml` runs on every pull request and on every push to `main`. A small `changes` job first checks which files changed, then two jobs run in parallel:
+The GitHub Actions workflow in `.github/workflows/tests.yml` runs on every pull request, on every push to `main`, and manually from the **Run workflow** button. A small `changes` job first checks which files changed, then `ci` and `docker` run in parallel, and on `main` the `deploy` job runs after both have passed:
 
-| Job      | What it does                                                                                                                    |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `ci`     | Formatting, linting, type checks, static analysis and tests, with the tests running against a PostgreSQL 18 service container   |
-| `docker` | Builds the production image (with layer caching), scans it with Trivy, and on `main` pushes it to the GitHub Container Registry |
+| Job      | What it does                                                                                                                                         |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci`     | Formatting, linting, type checks, static analysis and tests, with the tests running against a PostgreSQL 18 service container                        |
+| `docker` | Builds the production image (with layer caching), scans it with Trivy, and on `main` pushes that same scanned image to the GitHub Container Registry |
+| `deploy` | On `main` only, after approval: copies the image to ECR, registers a new task definition revision, runs the migrations, and rolls out the new image  |
 
-When a change only touches Markdown files, `ci` and `docker` are skipped. Skipped jobs count as passed, so documentation-only pull requests can still be merged.
+When a change only touches Markdown files, `ci`, `docker` and `deploy` are skipped. Skipped jobs count as passed, so documentation-only pull requests can still be merged.
+
+### Deployment
+
+```text
+merge to main → ci + docker → approval (production) → image to ECR → new task definition → migrations → rolling update on ECS
+```
+
+- **No AWS keys in GitHub.** The job signs in with OpenID Connect (OIDC): GitHub issues a short-lived token for this repository and the `production` Environment, and AWS exchanges it for one-hour credentials of the `notes-app-github-deploy` role. That role can only push to the app's ECR repository and deploy the app's ECS service.
+- **Manual approval.** The job uses the `production` GitHub Environment, which only accepts the `main` branch and waits for a required reviewer. When the AWS stack is not running, reject the pending deployment.
+- **Migrations first.** They run as a one-off ECS task with the new image. If they fail, the deploy stops and the old version keeps running.
+- **Zero-downtime rollout with automatic rollback.** ECS starts the new task before stopping the old one, and only sends traffic to it once the load balancer health check (`/up`) passes. If the new tasks keep failing, the deployment circuit breaker rolls back to the previous revision and the job fails.
+
+Terraform creates the ECS service once; after that, the deploy job decides which task definition revision runs (`ignore_changes = [task_definition]` in `infra/main/ecs.tf`). Each deploy starts from the latest revision and only replaces the image, so environment changes made in Terraform go out with the next deploy.
 
 Trivy results are uploaded to the repository's **Security → Code scanning** tab, and the build fails if the image contains a critical vulnerability that has a fix available.
 
@@ -124,6 +138,7 @@ The AWS infrastructure in `eu-south-1` is defined with Terraform in `infra/`:
 | Folder            | What it creates                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `infra/bootstrap` | The S3 bucket that stores the Terraform state (versioned, encrypted, private). Applied once, with local state.                                              |
+| `infra/github`    | The GitHub OIDC provider and the IAM role the deploy job assumes. Has its own state, so it stays when `infra/main` is destroyed.                            |
 | `infra/main`      | VPC with public and private subnets, security groups, ECR, RDS PostgreSQL, ECS Fargate (cluster, task definition, service) and an Application Load Balancer |
 
 ```text
@@ -132,38 +147,33 @@ Internet → ALB (public subnets) → ECS Fargate task → RDS PostgreSQL (priva
 
 Secrets never appear in the code, the plan or the state: RDS generates the database password and stores it in AWS Secrets Manager, the Laravel `APP_KEY` is stored in a Secrets Manager secret, and ECS injects both into the container when it starts.
 
-Bring the stack up:
+Bring the stack up from scratch:
 
 ```bash
 cd infra/main
 terraform init
-terraform apply
 
-# Push an image built by CI
-ECR_URL=$(terraform output -raw ecr_repository_url)
-aws ecr get-login-password --region eu-south-1 | docker login --username AWS --password-stdin ${ECR_URL%/*}
-docker pull --platform linux/amd64 ghcr.io/kazisohrabuddintitu/laravel-notes-devops:sha-<commit>
-docker tag ghcr.io/kazisohrabuddintitu/laravel-notes-devops:sha-<commit> ${ECR_URL}:sha-<commit>
-docker push ${ECR_URL}:sha-<commit>
+# 1. Create everything, but start no tasks yet: the new ECR repository is still empty
+terraform apply -var desired_count=0
 
-# Store a new APP_KEY in Secrets Manager (the value is never printed)
+# 2. Store a new APP_KEY in Secrets Manager (the value is never printed)
 aws secretsmanager put-secret-value --region eu-south-1 \
   --secret-id "$(terraform output -raw app_key_secret_arn)" \
-  --secret-string "$(docker run --rm --platform linux/amd64 -e SHOW_WELCOME_MESSAGE=false ${ECR_URL}:sha-<commit> php artisan key:generate --show | tail -n 1)"
+  --secret-string "base64:$(openssl rand -base64 32)"
 
-# Run the migrations as a one-off task, then open the app
-aws ecs run-task --region eu-south-1 --cluster "$(terraform output -raw ecs_cluster_name)" \
-  --launch-type FARGATE --task-definition "$(terraform output -raw task_definition_arn)" \
-  --network-configuration "awsvpcConfiguration={subnets=[$(terraform output -json public_subnet_ids | tr -d '[]" ')],securityGroups=[$(terraform output -raw app_security_group_id)],assignPublicIp=ENABLED}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["php","artisan","migrate","--force"]}]}'
+# 3. Deploy main: pushes the image to ECR, runs the migrations and updates the service
+gh workflow run tests.yml --ref main     # then approve the deployment in the Actions tab
+
+# 4. Start the app with the revision the deploy job registered
+terraform apply
 terraform output app_url
 ```
 
-The image tag defaults to the `image_tag` variable in `infra/main/variables.tf`. To keep costs low there is no NAT gateway (tasks get a public IP, but only the load balancer can reach them), and the whole stack is removed with `terraform destroy` when it is not needed.
+After that, every merge to `main` deploys after approval. To keep costs low there is no NAT gateway (tasks get a public IP, but only the load balancer can reach them), and the whole stack is removed with `terraform destroy` in `infra/main` when it is not needed. `infra/github` costs nothing and can stay.
 
 ## Workflow
 
-`main` is protected: every change goes through a pull request, both the `ci` and `docker` checks must pass, and the branch must be up to date with `main` before it can be merged.
+`main` is protected: every change goes through a pull request, both the `ci` and `docker` checks must pass, and the branch must be up to date with `main` before it can be merged. A merged change reaches production only after the deployment is approved in the `production` Environment.
 
 ## Roadmap
 
@@ -173,7 +183,7 @@ The image tag defaults to the `image_tag` variable in `infra/main/variables.tf`.
 - [x] Phase 3: CI pipeline (tests against PostgreSQL, image build, security scan, image publishing)
 - [x] Phase 4: AWS fundamentals (VPC, security groups, EC2, ECR, RDS, ECS Fargate and ALB, built by hand in the console)
 - [x] Phase 5: Infrastructure as Code with Terraform (VPC, ECS, RDS, ALB, state in S3, secrets in Secrets Manager)
-- [ ] Phase 6: Continuous deployment to AWS via GitHub OIDC
+- [x] Phase 6: Continuous deployment to AWS via GitHub OIDC (approval gate, migrations, zero-downtime rollout, automatic rollback)
 - [ ] Phase 7: Secrets and environments
 - [ ] Phase 8: AI note summaries with queues and Laravel Horizon
 - [ ] Phase 9: Custom domain and HTTPS
