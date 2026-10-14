@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  # Manual "Run workflow" button: rebuilds and redeploys the head of main.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,7 +26,14 @@ jobs:
 
       - name: Detect non-documentation changes
         id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual run: always build and deploy"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           changed=$(git diff --name-only HEAD^1 HEAD)
           echo "$changed"
           if echo "$changed" | grep -qvE '\.md$'; then
@@ -96,6 +105,8 @@ jobs:
       contents: read
       security-events: write
       packages: write
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
 
     steps:
       - name: Checkout code
@@ -106,12 +117,22 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      - name: Generate image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+
       - name: Build image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: production
           tags: notes-app:ci
+          labels: ${{ steps.meta.outputs.labels }}
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -142,30 +163,149 @@ jobs:
           exit-code: '1'
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image tags
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha
-            type=raw,value=latest
+      # Push the image that was just scanned (no rebuild), so what is
+      # published and deployed is exactly what Trivy checked.
+      - name: Push scanned image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker tag notes-app:ci "$tag"
+            docker push "$tag"
+          done
 
-      - name: Push image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - name: Output deploy tag
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        id: tag
+        run: echo "image_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  # Copies the image to ECR, runs migrations, then rolls out the new image.
+  # Waits for approval in the production Environment before it starts.
+  deploy:
+    needs: [ci, docker]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    # One deploy at a time; a newer run waits instead of cancelling this one.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+    env:
+      AWS_REGION: eu-south-1
+      CLUSTER: notes-app-cluster
+      SERVICE: notes-app-web
+      TASK_FAMILY: notes-app
+      ECR_REPOSITORY: notes-app
+      IMAGE_TAG: ${{ needs.docker.outputs.image_tag }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}:${{ needs.docker.outputs.image_tag }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          context: .
-          target: production
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Copy image from GHCR to ECR
+        run: |
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          ecr_image="${registry}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+
+          # Tags are immutable in ECR, so a re-run of the same commit reuses the image.
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "$ecr_image already exists, not pushing"
+          else
+            docker pull "$GHCR_IMAGE"
+            docker tag "$GHCR_IMAGE" "$ecr_image"
+            docker push "$ecr_image"
+          fi
+
+          echo "ECR_IMAGE=$ecr_image" >> "$GITHUB_ENV"
+
+      # Takes the latest revision (which also carries any env changes made with
+      # Terraform), swaps the image and registers it as a new revision.
+      - name: Register task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" --query taskDefinition --output json \
+            | jq --arg image "$ECR_IMAGE" '
+                (.containerDefinitions[] | select(.name == "app") | .image) = $image
+                | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            > task-definition.json
+
+          task_def=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --tags key=Project,value=notes-app key=ManagedBy,value=github-actions \
+            --query taskDefinition.taskDefinitionArn --output text)
+
+          echo "Registered $task_def"
+          echo "TASK_DEF=$task_def" >> "$GITHUB_ENV"
+
+      - name: Run database migrations
+        run: |
+          # Same subnets, security group and public IP setting as the service.
+          network=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].networkConfiguration' --output json)
+
+          task=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --launch-type FARGATE \
+            --task-definition "$TASK_DEF" \
+            --network-configuration "$network" \
+            --overrides '{"containerOverrides":[{"name":"app","command":["php","artisan","migrate","--force"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+
+          if [ -z "$task" ] || [ "$task" = "None" ]; then
+            echo "::error::Could not start the migration task"
+            exit 1
+          fi
+
+          echo "Migration task: $task"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+
+          read -r exit_code reason <<< "$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].[containers[0].exitCode, stoppedReason]' --output text)"
+
+          if [ "$exit_code" != "0" ]; then
+            echo "::error::Migrations failed (exit code $exit_code: $reason). Logs: CloudWatch /ecs/notes-app"
+            exit 1
+          fi
+          echo "Migrations finished"
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "$TASK_DEF" > /dev/null
+
+          echo "Waiting for the service to become stable..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+
+          # A circuit-breaker rollback also ends "stable", so check that our
+          # revision is the one running and that the rollout completed.
+          read -r running_def rollout <<< "$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].deployments[?status==`PRIMARY`] | [0].[taskDefinition, rolloutState]' --output text)"
+
+          if [ "$running_def" != "$TASK_DEF" ] || [ "$rollout" != "COMPLETED" ]; then
+            echo "::error::Deployment did not complete (running $running_def, rollout $rollout). ECS rolled back."
+            exit 1
+          fi
+
+          echo "### Deployed $IMAGE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Task definition: \`$TASK_DEF\`" >> "$GITHUB_STEP_SUMMARY"
